@@ -30,6 +30,11 @@ Aplikasi web berbasis Python (Streamlit) yang dirancang untuk membantu Surveyor 
 * **Klik Titik:** Klik pada marker hijau untuk melihat detail **Nama Titik**, **Tahun**, dan **Proyeksi/Zona UTM**.
 * **Ekspor Data:** Anda dapat mengunduh hasil saringan langsung ke format **Excel (.xlsx)** atau **Shapefile (.zip)**. Koordinat UTM Easting (X) dan Northing (Y) akan dihitung secara otomatis saat proses ekspor.
 
+### Screenshot
+![alt text](images/run_test1.png)
+
+![alt text](images/run_test2.png)
+
 ## 🛠️ Persyaratan Sistem
 Sebelum menjalankan aplikasi, pastikan Anda memiliki:
 1. Python 3.9+
