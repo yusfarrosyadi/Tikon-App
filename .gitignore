@@ -6,6 +6,9 @@ data_tikon.prj
 data_tikon.cpg
 data_tikon.qix
 data_tikon.cst
+data_tikon.sbn
+data_tikon.sbx
+data_tikon.xml
 
 # Mengabaikan file sistem dan cache Python
 __pycache__/
