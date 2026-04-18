@@ -9,173 +9,119 @@ import os
 import zipfile
 import fiona
 
-# --- MENGAKTIFKAN KUNCI INGGRIS BUAT BACA KML/KMZ ---
+# Setup KML Support
 fiona.drvsupport.supported_drivers['KML'] = 'rw'
 fiona.drvsupport.supported_drivers['LIBKML'] = 'rw'
-# ---------------------------------------------------
 
 st.set_page_config(page_title="Tikon App - Monitoring Titik Kontrol", layout="wide")
 
-st.title("📍 Tikon App - Monitoring Ketersediaan Titik Kontrol")
-st.write("Upload batas area (AOI), atur jarak buffer, dan sistem otomatis membuat blok kotak (Bounding Box) untuk mencari titik kontrol.")
-
+# --- DATABASE MASTER ---
 @st.cache_data
 def load_master_data():
     gdf = gpd.read_file("data_tikon.shp")
     return gdf.to_crs(epsg=4326)
 
-with st.spinner("Memuat Master Database..."):
+with st.spinner("Memuat Database Master..."):
     gdf_master = load_master_data()
 
-col1, col2 = st.columns([1, 3])
-
-with col1:
-    st.subheader("1. Upload Area Kerja (AOI)")
-    st.info("Format: ZIP (SHP), GeoJSON, KML, atau KMZ.")
-    uploaded_file = st.file_uploader("Pilih file batas area:", type=['zip', 'geojson', 'kml', 'kmz'])
+# --- SIDEBAR: LAYOUT ALA SENIOR ---
+with st.sidebar:
+    st.title("⚙️ Konfigurasi")
+    st.subheader("1. Batas Area Kerja")
+    uploaded_file = st.file_uploader("Upload AOI (ZIP, KML, KMZ, GeoJSON):", type=['zip', 'geojson', 'kml', 'kmz'])
     
     st.write("---")
-    st.subheader("2. Pengaturan Blok Kotak (Buffer)")
-    buffer_meters = st.number_input("Lebar Buffer Area (Meter):", min_value=0, value=5000, step=1000)
+    st.subheader("2. Parameter Bounding Box")
+    buffer_meters = st.number_input("Lebar Buffer (Meter):", min_value=0, value=5000, step=1000)
+    
+    st.write("---")
+    st.info("Aplikasi ini otomatis menyaring titik kontrol dan menghitung zona UTM berdasarkan AOI.")
 
-with col2:
-    st.subheader("3. Peta Visualisasi")
-    m = folium.Map(location=[-2.5, 118.0], zoom_start=5)
-    filtered_gdf = gpd.GeoDataFrame()
-    base_filename = "Area_Kerja" # Nama default kalau nggak ada file
+# --- MAIN PANEL ---
+# Logika penamaan dinamis
+if uploaded_file:
+    # Ambil nama file asli tanpa ekstensi buat jadi variabel nama
+    nama_area = os.path.splitext(uploaded_file.name)[0]
+    st.title(f"📍 Monitoring Ketersediaan: {nama_area}")
+else:
+    nama_area = "Seluruh_Indonesia"
+    st.title("📍 Tikon App - Monitoring Ketersediaan Titik Kontrol")
 
-    if uploaded_file is not None:
-        # Ambil nama file tanpa ekstensi (Contoh: "02 AOI.zip" jadi "02 AOI")
-        base_filename = os.path.splitext(uploaded_file.name)[0]
+m = folium.Map(location=[-2.5, 118.0], zoom_start=5)
+filtered_gdf = gpd.GeoDataFrame()
+
+if uploaded_file is not None:
+    with st.spinner(f"Memproses area {nama_area}..."):
+        ext = uploaded_file.name.split('.')[-1].lower()
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.' + ext) as tmp:
+            tmp.write(uploaded_file.getvalue())
+            tmp_path = tmp.name
         
-        with st.spinner("Membaca dan memproses area kerja lu..."):
-            ext = uploaded_file.name.split('.')[-1].lower()
+        try:
+            # Baca file sesuai format
+            if ext == 'kml': aoi_gdf = gpd.read_file(tmp_path, driver='KML')
+            elif ext == 'kmz':
+                with zipfile.ZipFile(tmp_path, 'r') as kmz:
+                    kml_name = [f for f in kmz.namelist() if f.endswith('.kml')][0]
+                    kmz.extract(kml_name, tempfile.gettempdir())
+                    aoi_gdf = gpd.read_file(os.path.join(tempfile.gettempdir(), kml_name), driver='KML')
+            else: aoi_gdf = gpd.read_file(tmp_path)
             
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.' + ext) as tmp:
-                tmp.write(uploaded_file.getvalue())
-                tmp_path = tmp.name
+            aoi_gdf = aoi_gdf.to_crs(epsg=4326)
+
+            # Proses Bounding Box
+            utm_crs_aoi = aoi_gdf.estimate_utm_crs()
+            aoi_utm = aoi_gdf.to_crs(utm_crs_aoi)
+            aoi_utm_box = aoi_utm.buffer(buffer_meters).envelope
+            aoi_buffered_4326 = aoi_utm_box.to_crs(4326)
             
-            try:
-                # --- LOGIKA MEMBACA BERBAGAI FORMAT FILE ---
-                if ext == 'kml':
-                    aoi_gdf = gpd.read_file(tmp_path, driver='KML')
-                elif ext == 'kmz':
-                    with zipfile.ZipFile(tmp_path, 'r') as kmz:
-                        kml_name = [f for f in kmz.namelist() if f.endswith('.kml')][0]
-                        kmz.extract(kml_name, tempfile.gettempdir())
-                        extracted_kml_path = os.path.join(tempfile.gettempdir(), kml_name)
-                        aoi_gdf = gpd.read_file(extracted_kml_path, driver='KML')
-                else:
-                    aoi_gdf = gpd.read_file(tmp_path)
-                
-                aoi_gdf = aoi_gdf.to_crs(epsg=4326)
+            # Gambar Peta
+            folium.GeoJson(aoi_gdf, style_function=lambda x: {'color': 'red', 'weight': 2, 'fillOpacity': 0}).add_to(m)
+            folium.GeoJson(aoi_buffered_4326, style_function=lambda x: {'color': 'yellow', 'fillColor': 'yellow', 'fillOpacity': 0.1}).add_to(m)
+            m.fit_bounds([[aoi_buffered_4326.total_bounds[1], aoi_buffered_4326.total_bounds[0]], [aoi_buffered_4326.total_bounds[3], aoi_buffered_4326.total_bounds[2]]])
 
-                # --- PROSES BUFFERING MENJADI KOTAK (ENVELOPE) ---
-                utm_crs_aoi = aoi_gdf.estimate_utm_crs()
-                aoi_utm = aoi_gdf.to_crs(utm_crs_aoi)
-                aoi_utm_buffered = aoi_utm.buffer(buffer_meters)
-                aoi_utm_box = aoi_utm_buffered.envelope
-                aoi_buffered_4326 = aoi_utm_box.to_crs(4326)
-                
-                # --- VISUALISASI PETA ---
-                folium.GeoJson(
-                    aoi_gdf,
-                    style_function=lambda x: {'fillColor': 'none', 'color': 'red', 'weight': 2}
-                ).add_to(m)
+            # Query Titik
+            filtered_gdf = gdf_master[gdf_master.geometry.within(aoi_buffered_4326.unary_union)].copy()
 
-                if buffer_meters >= 0:
-                    folium.GeoJson(
-                        aoi_buffered_4326,
-                        style_function=lambda x: {'fillColor': 'yellow', 'color': 'yellow', 'weight': 2, 'fillOpacity': 0.15}
-                    ).add_to(m)
+            if not filtered_gdf.empty:
+                utm_crs_titik = filtered_gdf.estimate_utm_crs()
+                filtered_utm = filtered_gdf.to_crs(utm_crs_titik)
+                filtered_gdf['UTM_X'] = filtered_utm.geometry.x.round(3)
+                filtered_gdf['UTM_Y'] = filtered_utm.geometry.y.round(3)
+                filtered_gdf['Zona_UTM'] = utm_crs_titik.name
 
-                bounds = aoi_buffered_4326.total_bounds
-                m.fit_bounds([[bounds[1], bounds[0]], [bounds[3], bounds[2]]])
+                for idx, row in filtered_gdf.iterrows():
+                    popup_html = f"<b>Titik:</b> {row.get('NAMOBJ','N/A')}<br><b>Tahun:</b> {row.get('ACQ_TAHUN','N/A')}<br><b>Proyeksi:</b> {row.get('Zona_UTM','N/A')}"
+                    folium.Marker([row.geometry.y, row.geometry.x], popup=folium.Popup(popup_html, max_width=250), icon=folium.Icon(color="green")).add_to(m)
+        except Exception as e: st.error(f"Error: {e}")
+        finally: os.remove(tmp_path)
 
-                # --- SPATIAL QUERY BERDASARKAN KOTAK ---
-                filtered_gdf = gdf_master[gdf_master.geometry.within(aoi_buffered_4326.unary_union)].copy()
+st_folium(m, width="100%", height=500)
 
-                if not filtered_gdf.empty:
-                    utm_crs_titik = filtered_gdf.estimate_utm_crs()
-                    filtered_utm = filtered_gdf.to_crs(utm_crs_titik)
-                    
-                    filtered_gdf['UTM_X'] = filtered_utm.geometry.x.round(3)
-                    filtered_gdf['UTM_Y'] = filtered_utm.geometry.y.round(3)
-                    filtered_gdf['Zona_UTM'] = utm_crs_titik.name
-
-                    # Nempelin titik ke peta dengan Pop-up Custom
-                    for idx, row in filtered_gdf.iterrows():
-                        nama_titik = row.get('NAMOBJ', 'N/A')
-                        tahun = row.get('ACQ_TAHUN', 'N/A')
-                        zona = row.get('Zona_UTM', 'N/A')
-
-                        popup_html = f"""
-                        <div style='min-width: 150px; font-family: sans-serif;'>
-                            <b>Nama Titik:</b> {nama_titik}<br>
-                            <b>Tahun:</b> {tahun}<br>
-                            <b>Proyeksi:</b> {zona}
-                        </div>
-                        """
-
-                        folium.Marker(
-                            location=[row.geometry.y, row.geometry.x],
-                            popup=folium.Popup(popup_html, max_width=300),
-                            icon=folium.Icon(color="green", icon="info-sign")
-                        ).add_to(m)
-                    
-            except Exception as e:
-                st.error(f"Gagal memproses file: {e}. Pastikan file valid.")
-            finally:
-                os.remove(tmp_path) 
-                
-    st_folium(m, width="100%", height=500)
-
-# --- BAGIAN TABEL & TOMBOL DOWNLOAD EXCEL/SHP ---
+# --- TABEL & DOWNLOAD DENGAN NAMA OTOMATIS ---
 if not filtered_gdf.empty:
     st.write("---")
-    st.subheader(f"✅ Ditemukan {len(filtered_gdf)} Titik Kontrol dalam AOI")
+    st.success(f"✅ Ditemukan {len(filtered_gdf)} Titik Kontrol dalam area {nama_area}")
     
     tabel_tampil = filtered_gdf.drop(columns='geometry')
     st.dataframe(tabel_tampil, use_container_width=True)
 
-    st.write("**Silakan pilih format download hasil saringan:**")
-    
-    # Bikin tombolnya sejajar (2 Kolom)
     col_dl1, col_dl2 = st.columns(2)
-
+    
     with col_dl1:
-        # 1. DOWNLOAD EXCEL
-        excel_buffer = io.BytesIO()
-        with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-            tabel_tampil.to_excel(writer, index=False, sheet_name='Titik_Kontrol')
-        
-        st.download_button(
-            label="📥 Download Data (Excel .xlsx)",
-            data=excel_buffer.getvalue(),
-            file_name=f'Titik_Kontrol_{base_filename}.xlsx',
-            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
+        # Nama file otomatis ngikutin AOI
+        excel_name = f"Titik_Kontrol_{nama_area}.xlsx"
+        buffer_excel = io.BytesIO()
+        with pd.ExcelWriter(buffer_excel, engine='openpyxl') as writer:
+            tabel_tampil.to_excel(writer, index=False)
+        st.download_button(f"📥 Download Excel ({excel_name})", data=buffer_excel.getvalue(), file_name=excel_name)
 
     with col_dl2:
-        # 2. DOWNLOAD SHAPEFILE (Bentuk ZIP)
+        shp_zip_name = f"SHP_Tikon_{nama_area}.zip"
         shp_buffer = io.BytesIO()
-        
-        # Bikin folder sementara buat nyimpen file-file SHP (.shp, .dbf, .shx, dll)
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Nama file di dalam zip-nya kita bikin agak pendek
-            export_path = os.path.join(tmpdir, f"Tikon_{base_filename[:15]}.shp")
-            
-            # Export data yang udah ada info UTM-nya jadi SHP
-            filtered_gdf.to_file(export_path, driver='ESRI Shapefile')
-            
-            # Bungkus semua rombongan SHP itu jadi satu file ZIP
-            with zipfile.ZipFile(shp_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-                for file in os.listdir(tmpdir):
-                    zf.write(os.path.join(tmpdir, file), arcname=file)
-
-        st.download_button(
-            label="🗺️ Download Data (Shapefile .zip)",
-            data=shp_buffer.getvalue(),
-            file_name=f'Titik_Kontrol_{base_filename}_SHP.zip',
-            mime='application/zip'
-        )
+            path_shp = os.path.join(tmpdir, "export.shp")
+            filtered_gdf.to_file(path_shp)
+            with zipfile.ZipFile(shp_buffer, 'w') as zf:
+                for f in os.listdir(tmpdir): zf.write(os.path.join(tmpdir, f), arcname=f)
+        st.download_button(f"🗺️ Download SHP ({shp_zip_name})", data=shp_buffer.getvalue(), file_name=shp_zip_name)
